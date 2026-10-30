@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  discussions: write
 
 concurrency:
   group: mbc-austin-events-monitor
@@ -27,21 +28,18 @@ jobs:
       - name: Run tests
         run: python -m unittest discover -s tests
 
-      - name: Check events and send email if needed
+      - name: Check events and post Discussion update
         run: python monitor.py
         env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          MAIL_FROM: ${{ secrets.MAIL_FROM }}
-          MAIL_TO: ${{ secrets.MAIL_TO }}
+          GITHUB_TOKEN: ${{ github.token }}
+          NOTIFY_GITHUB_USERNAME: ${{ vars.NOTIFY_GITHUB_USERNAME }}
+          DISCUSSION_CATEGORY_NAME: ${{ vars.DISCUSSION_CATEGORY_NAME }}
 
       - name: Save updated event state
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state/events.json
+          git add state/
           if git diff --cached --quiet; then
             echo "Event state is unchanged."
           else

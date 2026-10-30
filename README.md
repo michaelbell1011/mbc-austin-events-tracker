@@ -1,6 +1,6 @@
 # mbc-austin-events-tracker
 
-This monitors the MBC Austin events webpage (https://mbcaustin.org/events) for new event listings and revisions to existing events. When it finds an update, it sends an email with this message:
+This monitors the MBC Austin events webpage (https://mbcaustin.org/events) for new event listings and revisions to existing events. When it finds an update, it posts to one ongoing GitHub Discussion titled **MBC Events Updates** with this message:
 
 > new updates found on the MBC events page https://mbcaustin.org/events
 
@@ -10,16 +10,12 @@ The monitor reads the events RSS feed, compares event IDs, dates, titles, and de
 
 The workflow runs daily and can also be started manually from the Actions tab. Scheduled workflow times use UTC and can be delayed by GitHub.
 
-Add these repository Actions secrets under **Settings > Secrets and variables > Actions**:
+Enable Discussions for the repository and make sure it has a category named `General` (or configure a different category name). Add these repository Actions variables under **Settings > Secrets and variables > Actions**:
 
-- `SMTP_HOST`: your email provider's SMTP server
-- `SMTP_PORT`: usually `587`
-- `SMTP_USERNAME`: SMTP account username
-- `SMTP_PASSWORD`: SMTP password or app password
-- `MAIL_FROM`: sender email address
-- `MAIL_TO`: notification recipient email address
+- `NOTIFY_GITHUB_USERNAME`: your GitHub username; each Discussion post mentions this account to generate a notification
+- `DISCUSSION_CATEGORY_NAME`: optional; defaults to `General`
 
-The workflow needs `contents: write` permission to commit the updated event snapshot. On the first scheduled or manually triggered run, it saves the baseline; subsequent new or revised event records trigger the email.
+The workflow uses its `GITHUB_TOKEN` with `contents: write` to commit the event snapshot and Discussion ID, and `discussions: write` to post updates. On the first scheduled or manually triggered run, it saves the event baseline without creating a discussion. The first subsequent update creates the discussion; later updates are added as comments to that same discussion.
 
 ## Local checks
 
@@ -29,4 +25,4 @@ Run the test suite with:
 python3 -m unittest discover -s tests
 ```
 
-To run the monitor locally, set the SMTP environment variables above and run `python3 monitor.py`. It will create `state/events.json` on its first run.
+To run the monitor locally, set `GITHUB_TOKEN`, `GITHUB_REPOSITORY`, and `NOTIFY_GITHUB_USERNAME`, then run `python3 monitor.py`. It will create `state/events.json` on its first run.

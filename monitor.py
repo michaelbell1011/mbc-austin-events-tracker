@@ -1,12 +1,9 @@
 import argparse
-from email.message import EmailMessage
 from html.parser import HTMLParser
 import json
 import os
 from pathlib import Path
 import re
-import smtplib
-import ssl
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -14,7 +11,10 @@ import xml.etree.ElementTree as ET
 EVENTS_URL = "https://mbcaustin.org/events"
 FEED_URL = f"{EVENTS_URL}/RSS"
 NOTIFICATION = f"new updates found on the MBC events page {EVENTS_URL}"
+DISCUSSION_TITLE = "MBC Events Updates"
 STATE_PATH = Path("state/events.json")
+DISCUSSION_STATE_PATH = Path("state/discussion.json")
+GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
 
 
 class _DescriptionParser(HTMLParser):
@@ -109,35 +109,153 @@ def save_state(state_path, events):
     temporary_path.replace(state_path)
 
 
-def send_notification():
-    required = ("SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "MAIL_FROM", "MAIL_TO")
+def github_graphql(token, query, variables):
+    request = urllib.request.Request(
+        GITHUB_GRAPHQL_URL,
+        data=json.dumps({"query": query, "variables": variables}).encode(),
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "mbc-austin-events-tracker/1.0",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.loads(response.read())
+    if result.get("errors"):
+        raise RuntimeError(f"GitHub GraphQL request failed: {result['errors']}")
+    return result["data"]
+
+
+def load_discussion_id(state_path):
+    if not state_path.exists():
+        return None
+    with state_path.open(encoding="utf-8") as state_file:
+        state = json.load(state_file)
+    discussion_id = state.get("id") if isinstance(state, dict) else None
+    if not discussion_id:
+        raise ValueError("Saved discussion state must contain an id")
+    return discussion_id
+
+
+def save_discussion_id(state_path, discussion_id):
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = state_path.with_suffix(".tmp")
+    with temporary_path.open("w", encoding="utf-8") as state_file:
+        json.dump({"id": discussion_id}, state_file, indent=2)
+        state_file.write("\n")
+    temporary_path.replace(state_path)
+
+
+def post_discussion_update(token, repository, username, category_name, state_path):
+    discussion_id = load_discussion_id(state_path)
+    if discussion_id is None:
+        owner, name = repository.split("/", 1)
+        repository_query = """
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            id
+            discussionCategories(first: 100) { nodes { id name } }
+            discussions(first: 100) { nodes { id title } }
+          }
+        }
+        """
+        data = github_graphql(token, repository_query, {"owner": owner, "name": name})
+        repository_data = data.get("repository")
+        if repository_data is None:
+            raise RuntimeError(f"Could not access GitHub repository {repository}")
+
+        discussion = next(
+            (
+                item
+                for item in repository_data["discussions"]["nodes"]
+                if item["title"] == DISCUSSION_TITLE
+            ),
+            None,
+        )
+        if discussion is not None:
+            discussion_id = discussion["id"]
+        else:
+            category = next(
+                (
+                    item
+                    for item in repository_data["discussionCategories"]["nodes"]
+                    if item["name"].lower() == category_name.lower()
+                ),
+                None,
+            )
+            if category is None:
+                raise RuntimeError(
+                    f"Discussion category '{category_name}' was not found in {repository}"
+                )
+            create_mutation = """
+            mutation($repositoryId: ID!, $categoryId: ID!, $title: String!, $body: String!) {
+              createDiscussion(input: {
+                repositoryId: $repositoryId,
+                categoryId: $categoryId,
+                title: $title,
+                body: $body
+              }) { discussion { id } }
+            }
+            """
+            data = github_graphql(
+                token,
+                create_mutation,
+                {
+                    "repositoryId": repository_data["id"],
+                    "categoryId": category["id"],
+                    "title": DISCUSSION_TITLE,
+                    "body": f"@{username}\n\n{NOTIFICATION}",
+                },
+            )
+            discussion_id = data["createDiscussion"]["discussion"]["id"]
+            save_discussion_id(state_path, discussion_id)
+            return
+
+    comment_mutation = """
+    mutation($discussionId: ID!, $body: String!) {
+      addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
+        comment { id }
+      }
+    }
+    """
+    github_graphql(
+        token,
+        comment_mutation,
+        {
+            "discussionId": discussion_id,
+            "body": f"@{username}\n\n{NOTIFICATION}",
+        },
+    )
+    save_discussion_id(state_path, discussion_id)
+
+
+def send_notification(discussion_state_path):
+    required = ("GITHUB_TOKEN", "GITHUB_REPOSITORY", "NOTIFY_GITHUB_USERNAME")
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
-        raise RuntimeError(f"Missing required email settings: {', '.join(missing)}")
+        raise RuntimeError(f"Missing required GitHub settings: {', '.join(missing)}")
 
-    message = EmailMessage()
-    message["Subject"] = "MBC events page update"
-    message["From"] = os.environ["MAIL_FROM"]
-    message["To"] = os.environ["MAIL_TO"]
-    message.set_content(NOTIFICATION)
-
-    with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"]), timeout=30) as server:
-        server.starttls(context=ssl.create_default_context())
-        server.login(os.environ["SMTP_USERNAME"], os.environ["SMTP_PASSWORD"])
-        server.send_message(message)
+    post_discussion_update(
+        token=os.environ["GITHUB_TOKEN"],
+        repository=os.environ["GITHUB_REPOSITORY"],
+        username=os.environ["NOTIFY_GITHUB_USERNAME"].lstrip("@"),
+        category_name=os.environ.get("DISCUSSION_CATEGORY_NAME") or "General",
+        state_path=discussion_state_path,
+    )
 
 
-def run(state_path):
+def run(state_path, discussion_state_path=DISCUSSION_STATE_PATH):
     current = fetch_events()
     previous = load_state(state_path)
 
     if previous is None:
         save_state(state_path, current)
-        print(f"Saved initial baseline with {len(current)} events; no email sent.")
+        print(f"Saved initial baseline with {len(current)} events; no Discussion posted.")
         return
 
     if has_updates(previous, current):
-        send_notification()
+        send_notification(discussion_state_path)
         print(NOTIFICATION)
 
     save_state(state_path, current)
@@ -146,8 +264,9 @@ def run(state_path):
 def main():
     parser = argparse.ArgumentParser(description="Monitor MBC Austin event updates")
     parser.add_argument("--state-file", type=Path, default=STATE_PATH)
+    parser.add_argument("--discussion-state-file", type=Path, default=DISCUSSION_STATE_PATH)
     args = parser.parse_args()
-    run(args.state_file)
+    run(args.state_file, args.discussion_state_file)
 
 
 if __name__ == "__main__":

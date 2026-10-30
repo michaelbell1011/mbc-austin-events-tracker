@@ -1,6 +1,9 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from monitor import has_updates, parse_events
+from monitor import NOTIFICATION, has_updates, parse_events, post_discussion_update
 
 
 def make_feed(title="Breakfast speaker", date="Wed, 04 Nov 2026 13:00:00 GMT", description="<p>Join us.</p>"):
@@ -44,6 +47,54 @@ class MonitorTests(unittest.TestCase):
         events = parse_events(make_feed())
 
         self.assertFalse(has_updates(events, events))
+
+    def test_creates_discussion_for_first_update(self):
+        with TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "discussion.json"
+            with patch("monitor.github_graphql") as graphql:
+                graphql.side_effect = [
+                    {
+                        "repository": {
+                            "id": "repository-id",
+                            "discussionCategories": {
+                                "nodes": [{"id": "category-id", "name": "General"}]
+                            },
+                            "discussions": {"nodes": []},
+                        }
+                    },
+                    {"createDiscussion": {"discussion": {"id": "discussion-id"}}},
+                ]
+
+                post_discussion_update(
+                    "token", "owner/repo", "maintainer", "General", state_path
+                )
+
+            self.assertEqual(graphql.call_count, 2)
+            create_variables = graphql.call_args_list[1].args[2]
+            self.assertEqual(create_variables["title"], "MBC Events Updates")
+            self.assertEqual(
+                create_variables["body"], f"@maintainer\n\n{NOTIFICATION}"
+            )
+            self.assertEqual(state_path.read_text(), '{\n  "id": "discussion-id"\n}\n')
+
+    def test_posts_followup_as_comment_on_same_discussion(self):
+        with TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "discussion.json"
+            state_path.write_text('{"id": "discussion-id"}')
+            with patch("monitor.github_graphql") as graphql:
+                post_discussion_update(
+                    "token", "owner/repo", "maintainer", "General", state_path
+                )
+
+            graphql.assert_called_once()
+            self.assertIn("addDiscussionComment", graphql.call_args.args[1])
+            self.assertEqual(
+                graphql.call_args.args[2],
+                {
+                    "discussionId": "discussion-id",
+                    "body": f"@maintainer\n\n{NOTIFICATION}",
+                },
+            )
 
 
 if __name__ == "__main__":
