@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from monitor import NOTIFICATION, has_updates, parse_events, post_discussion_update
+from monitor import NOTIFICATION, has_updates, parse_events, post_discussion_update, run
 
 
 def make_feed(title="Breakfast speaker", date="Wed, 04 Nov 2026 13:00:00 GMT", description="<p>Join us.</p>"):
@@ -18,6 +18,51 @@ def make_feed(title="Breakfast speaker", date="Wed, 04 Nov 2026 13:00:00 GMT", d
 
 
 class MonitorTests(unittest.TestCase):
+    def test_run_logs_initial_baseline_result(self):
+        with TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "events.json"
+            events = parse_events(make_feed())
+            with patch("monitor.fetch_events", return_value=events), patch(
+                "monitor.load_state", return_value=None
+            ), patch("monitor.save_state") as save_state, self.assertLogs(
+                "monitor", level="INFO"
+            ) as logs:
+                run(state_path)
+
+            save_state.assert_called_once_with(state_path, events)
+            self.assertIn("Saved initial baseline", " ".join(logs.output))
+
+    def test_run_logs_unchanged_result(self):
+        with TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "events.json"
+            events = parse_events(make_feed())
+            with patch("monitor.fetch_events", return_value=events), patch(
+                "monitor.load_state", return_value=events
+            ), patch("monitor.save_state") as save_state, patch(
+                "monitor.send_notification"
+            ) as send_notification, self.assertLogs("monitor", level="INFO") as logs:
+                run(state_path)
+
+            save_state.assert_called_once_with(state_path, events)
+            send_notification.assert_not_called()
+            self.assertIn("No event updates detected", " ".join(logs.output))
+
+    def test_run_logs_successful_update_result(self):
+        with TemporaryDirectory() as temporary_directory:
+            state_path = Path(temporary_directory) / "events.json"
+            previous = {}
+            events = parse_events(make_feed())
+            with patch("monitor.fetch_events", return_value=events), patch(
+                "monitor.load_state", return_value=previous
+            ), patch("monitor.save_state") as save_state, patch(
+                "monitor.send_notification"
+            ) as send_notification, self.assertLogs("monitor", level="INFO") as logs:
+                run(state_path)
+
+            save_state.assert_called_once_with(state_path, events)
+            send_notification.assert_called_once()
+            self.assertIn("Discussion update posted", " ".join(logs.output))
+
     def test_parse_feed_uses_stable_event_id_and_normalizes_description(self):
         events = parse_events(make_feed(description="<p>Join <strong>us</strong>.</p>"))
 
