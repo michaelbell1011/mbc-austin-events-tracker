@@ -3,7 +3,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from monitor import NOTIFICATION, has_updates, parse_events, post_discussion_update, run
+from monitor import (
+    NOTIFICATION,
+    classify_changes,
+    describe_changes,
+    has_updates,
+    parse_events,
+    post_discussion_update,
+    run,
+)
 
 
 def make_feed(title="Breakfast speaker", date="Wed, 04 Nov 2026 13:00:00 GMT", description="<p>Join us.</p>"):
@@ -61,6 +69,10 @@ class MonitorTests(unittest.TestCase):
 
             save_state.assert_called_once_with(state_path, events)
             send_notification.assert_called_once()
+            self.assertIn(
+                "New events added:\n- Breakfast speaker",
+                send_notification.call_args.args[1],
+            )
             self.assertIn("Discussion update posted", " ".join(logs.output))
 
     def test_parse_feed_uses_stable_event_id_and_normalizes_description(self):
@@ -81,6 +93,26 @@ class MonitorTests(unittest.TestCase):
         current = parse_events(make_feed())
 
         self.assertTrue(has_updates({}, current))
+
+    def test_classifies_added_and_updated_events(self):
+        previous = {
+            "existing": {"title": "Old title", "date": "old date", "description": "Old"},
+            "unchanged": {"title": "Unchanged", "date": "date", "description": "Same"},
+        }
+        current = {
+            "existing": {"title": "Revised title", "date": "new date", "description": "New"},
+            "unchanged": previous["unchanged"],
+            "new": {"title": "New event", "date": "date", "description": "Details"},
+        }
+
+        added, updated = classify_changes(previous, current)
+
+        self.assertEqual(added, ["New event"])
+        self.assertEqual(updated, ["Revised title"])
+        message = describe_changes(added, updated)
+        self.assertIn("New events added:\n- New event", message)
+        self.assertIn("Existing events updated:\n- Revised title", message)
+        self.assertNotIn("Unchanged", message)
 
     def test_detects_event_revision(self):
         previous = parse_events(make_feed())
@@ -110,16 +142,22 @@ class MonitorTests(unittest.TestCase):
                     {"createDiscussion": {"discussion": {"id": "discussion-id"}}},
                 ]
 
+                notification = (
+                    f"{NOTIFICATION}\n\nNew events added:\n- Breakfast speaker"
+                )
                 post_discussion_update(
-                    "token", "owner/repo", "maintainer", "General", state_path
+                    "token",
+                    "owner/repo",
+                    "maintainer",
+                    "General",
+                    state_path,
+                    notification,
                 )
 
             self.assertEqual(graphql.call_count, 2)
             create_variables = graphql.call_args_list[1].args[2]
             self.assertEqual(create_variables["title"], "MBC Events Updates")
-            self.assertEqual(
-                create_variables["body"], f"@maintainer\n\n{NOTIFICATION}"
-            )
+            self.assertEqual(create_variables["body"], f"@maintainer\n\n{notification}")
             self.assertEqual(state_path.read_text(), '{\n  "id": "discussion-id"\n}\n')
 
     def test_posts_followup_as_comment_on_same_discussion(self):
@@ -127,8 +165,16 @@ class MonitorTests(unittest.TestCase):
             state_path = Path(temporary_directory) / "discussion.json"
             state_path.write_text('{"id": "discussion-id"}')
             with patch("monitor.github_graphql") as graphql:
+                notification = (
+                    f"{NOTIFICATION}\n\nExisting events updated:\n- Revised speaker"
+                )
                 post_discussion_update(
-                    "token", "owner/repo", "maintainer", "General", state_path
+                    "token",
+                    "owner/repo",
+                    "maintainer",
+                    "General",
+                    state_path,
+                    notification,
                 )
 
             graphql.assert_called_once()
@@ -137,7 +183,7 @@ class MonitorTests(unittest.TestCase):
                 graphql.call_args.args[2],
                 {
                     "discussionId": "discussion-id",
-                    "body": f"@maintainer\n\n{NOTIFICATION}",
+                    "body": f"@maintainer\n\n{notification}",
                 },
             )
 

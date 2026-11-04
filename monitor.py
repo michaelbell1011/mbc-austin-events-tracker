@@ -86,10 +86,30 @@ def fetch_events():
 
 
 def has_updates(previous, current):
-    return any(
-        event_id not in previous or previous[event_id] != record
-        for event_id, record in current.items()
-    )
+    added, updated = classify_changes(previous, current)
+    return bool(added or updated)
+
+
+def classify_changes(previous, current):
+    added = []
+    updated = []
+    for event_id, record in current.items():
+        if event_id not in previous:
+            added.append(record["title"])
+        elif previous[event_id] != record:
+            updated.append(record["title"])
+    return added, updated
+
+
+def describe_changes(added, updated):
+    sections = []
+    if added:
+        sections.append("New events added:\n" + "\n".join(f"- {title}" for title in added))
+    if updated:
+        sections.append(
+            "Existing events updated:\n" + "\n".join(f"- {title}" for title in updated)
+        )
+    return f"{NOTIFICATION}\n\n" + "\n\n".join(sections)
 
 
 def load_state(state_path):
@@ -149,7 +169,9 @@ def save_discussion_id(state_path, discussion_id):
     temporary_path.replace(state_path)
 
 
-def post_discussion_update(token, repository, username, category_name, state_path):
+def post_discussion_update(
+    token, repository, username, category_name, state_path, notification=NOTIFICATION
+):
     discussion_id = load_discussion_id(state_path)
     if discussion_id is None:
         owner, name = repository.split("/", 1)
@@ -207,7 +229,7 @@ def post_discussion_update(token, repository, username, category_name, state_pat
                     "repositoryId": repository_data["id"],
                     "categoryId": category["id"],
                     "title": DISCUSSION_TITLE,
-                    "body": f"@{username}\n\n{NOTIFICATION}",
+                    "body": f"@{username}\n\n{notification}",
                 },
             )
             discussion_id = data["createDiscussion"]["discussion"]["id"]
@@ -226,13 +248,13 @@ def post_discussion_update(token, repository, username, category_name, state_pat
         comment_mutation,
         {
             "discussionId": discussion_id,
-            "body": f"@{username}\n\n{NOTIFICATION}",
+            "body": f"@{username}\n\n{notification}",
         },
     )
     save_discussion_id(state_path, discussion_id)
 
 
-def send_notification(discussion_state_path):
+def send_notification(discussion_state_path, notification=NOTIFICATION):
     required = ("GITHUB_TOKEN", "GITHUB_REPOSITORY", "NOTIFY_GITHUB_USERNAME")
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
@@ -244,6 +266,7 @@ def send_notification(discussion_state_path):
         username=os.environ["NOTIFY_GITHUB_USERNAME"].lstrip("@"),
         category_name=os.environ.get("DISCUSSION_CATEGORY_NAME") or "General",
         state_path=discussion_state_path,
+        notification=notification,
     )
 
 
@@ -258,9 +281,11 @@ def run(state_path, discussion_state_path=DISCUSSION_STATE_PATH):
         LOGGER.info("Saved initial baseline with %d events; no Discussion posted", len(current))
         return
 
-    if has_updates(previous, current):
+    added, updated = classify_changes(previous, current)
+    if added or updated:
+        notification = describe_changes(added, updated)
         LOGGER.info("Event updates detected; posting Discussion update")
-        send_notification(discussion_state_path)
+        send_notification(discussion_state_path, notification)
         LOGGER.info("Discussion update posted: %s", NOTIFICATION)
     else:
         LOGGER.info("No event updates detected")
