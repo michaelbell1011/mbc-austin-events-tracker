@@ -1,6 +1,7 @@
 import argparse
 from html.parser import HTMLParser
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,7 @@ DISCUSSION_TITLE = "MBC Events Updates"
 STATE_PATH = Path("state/events.json")
 DISCUSSION_STATE_PATH = Path("state/discussion.json")
 GITHUB_GRAPHQL_URL = "https://api.github.com/graphql"
+LOGGER = logging.getLogger(__name__)
 
 
 class _DescriptionParser(HTMLParser):
@@ -246,27 +248,41 @@ def send_notification(discussion_state_path):
 
 
 def run(state_path, discussion_state_path=DISCUSSION_STATE_PATH):
+    LOGGER.info("Starting MBC events check")
     current = fetch_events()
     previous = load_state(state_path)
+    LOGGER.info("Fetched %d events", len(current))
 
     if previous is None:
         save_state(state_path, current)
-        print(f"Saved initial baseline with {len(current)} events; no Discussion posted.")
+        LOGGER.info("Saved initial baseline with %d events; no Discussion posted", len(current))
         return
 
     if has_updates(previous, current):
+        LOGGER.info("Event updates detected; posting Discussion update")
         send_notification(discussion_state_path)
-        print(NOTIFICATION)
+        LOGGER.info("Discussion update posted: %s", NOTIFICATION)
+    else:
+        LOGGER.info("No event updates detected")
 
     save_state(state_path, current)
+    LOGGER.info("Saved event state to %s", state_path)
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description="Monitor MBC Austin event updates")
     parser.add_argument("--state-file", type=Path, default=STATE_PATH)
     parser.add_argument("--discussion-state-file", type=Path, default=DISCUSSION_STATE_PATH)
     args = parser.parse_args()
-    run(args.state_file, args.discussion_state_file)
+    try:
+        run(args.state_file, args.discussion_state_file)
+    except Exception:
+        LOGGER.exception("MBC events check failed")
+        raise
 
 
 if __name__ == "__main__":

@@ -17,6 +17,8 @@ Enable Discussions for the repository and make sure it has a category named `Gen
 
 The workflow uses its `GITHUB_TOKEN` with `contents: write` to commit the event snapshot and Discussion ID, and `discussions: write` to post updates. On the first scheduled or manually triggered run, it saves the event baseline without creating a discussion. The first subsequent update creates the discussion; later updates are added as comments to that same discussion.
 
+Each run writes timestamped status and result messages to the workflow log, including whether the baseline was saved, whether events changed, and whether a Discussion update was posted. Failures include an exception traceback and fail the workflow step. Open a run in the Actions tab and expand the monitor step to review its log.
+
 ## Local checks
 
 Run the test suite with:
